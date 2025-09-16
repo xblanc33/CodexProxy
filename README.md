@@ -78,6 +78,33 @@ curl -N -sS -X POST \
   -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+## Use with Codex CLI
+
+Configure Codex to send requests through this proxy by adding a new provider and selecting it as the default in your Codex TOML config.
+
+1) Make sure the proxy is reachable at the same port you reference in the Codex config. For the example below, set `PORT=5050` in your `.env` or adjust `base_url` to match your port.
+
+2) Start the proxy (`node server.js`).
+
+3) In your Codex config (TOML), add a provider and set it as default:
+
+```toml
+# Defaults
+model_provider = "openai2"
+model = "gpt-5"
+model_reasoning_effort = "medium"
+
+# Providers
+[model_providers.openai2]
+name = "openai2"
+base_url = "http://127.0.0.1:5050/v1"
+wire_api = "chat"
+```
+
+Notes:
+- `base_url` must point at this proxy (`/v1` path included) and the correct port.
+- If you want Codex to forward your own API key to the proxy, enable `ALLOW_CLIENT_AUTH=true` in the proxy `.env`. Otherwise, set `UPSTREAM_API_KEY` in the proxy `.env` so the proxy authenticates upstream on behalf of clients.
+
 ## Logging
 
 - Log file lives at: `logs/requests.ndjson` (relative to `server.js`).
@@ -158,4 +185,3 @@ Environment variables (via `.env`):
 ---
 
 Happy debugging and prompt‑tracing!
-
