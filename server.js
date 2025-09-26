@@ -3,7 +3,7 @@
  *
  * Features
  * - Logs full JSON request bodies (messages, params) to console and a file (logs/requests.ndjson)
- * - Forwards to an OpenAI-compatible API base (default: https://api.openai.com/v1)
+ * - Forwards to an OpenAI-compatible API base (default: https://api.openai.com)
  * - Supports streaming (SSE) by piping the upstream response
  * - Compatible routes: /v1/chat/completions and /v1/responses (can add more easily)
  * - Config via .env file
@@ -12,13 +12,14 @@
  *   1) npm i express dotenv
  *   2) Crée un fichier .env avec par ex. :
  *        PORT=5000
- *        API_BASE=https://api.openai.com/v1
+ *        API_BASE=https://api.openai.com
  *        UPSTREAM_API_KEY=sk-...
  *        ALLOW_CLIENT_AUTH=false
  *   3) node server.js
  */
 
 const fs = require('fs');
+const { promises: fsp } = fs;
 const path = require('path');
 const express = require('express');
 const crypto = require('crypto');
@@ -67,7 +68,21 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = Number(process.env.PORT || 5000);
-const API_BASE = (process.env.API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '');
+const rawNamespace = process.env.API_NAMESPACE;
+const API_NAMESPACE = typeof rawNamespace === 'string'
+  ? rawNamespace.trim().replace(/^\/+|\/+$/g, '')
+  : 'v1';
+const API_BASE = (() => {
+  const fallbackBase = 'https://api.openai.com';
+  const envBase = typeof process.env.API_BASE === 'string' ? process.env.API_BASE.trim() : '';
+  let base = envBase || fallbackBase;
+  base = base.replace(/\/+$/, '');
+  if (API_NAMESPACE && base.toLowerCase().endsWith(`/${API_NAMESPACE.toLowerCase()}`)) {
+    base = base.slice(0, -(API_NAMESPACE.length + 1));
+  }
+  return base;
+})();
+const ROUTE_PREFIX = API_NAMESPACE ? `/${API_NAMESPACE}` : '';
 const UPSTREAM_API_KEY = process.env.UPSTREAM_API_KEY || '';
 const ALLOW_CLIENT_AUTH = String(process.env.ALLOW_CLIENT_AUTH || 'false').toLowerCase() === 'true';
 const AUTO_PORT = String(process.env.AUTO_PORT || 'true').toLowerCase() === 'true';
@@ -77,17 +92,96 @@ const OPENAI_PROJECT = process.env.OPENAI_PROJECT || '';
 const OPENAI_BETA = process.env.OPENAI_BETA || '';
 const FORCE_OPENAI_HEADERS = String(process.env.FORCE_OPENAI_HEADERS || 'false').toLowerCase() === 'true';
 
+const upstreamOverrides = (() => {
+  const raw = process.env.UPSTREAM_URL_OVERRIDES;
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') {
+      console.warn('[config] UPSTREAM_URL_OVERRIDES must be a JSON object of { "route": "url" }');
+      return {};
+    }
+    const entries = Object.entries(parsed)
+      .filter(([key, value]) => typeof key === 'string' && typeof value === 'string' && value.trim().length > 0)
+      .map(([key, value]) => [key.trim(), value.trim()]);
+    return Object.fromEntries(entries);
+  } catch (err) {
+    console.warn(`[config] Failed to parse UPSTREAM_URL_OVERRIDES: ${err.message}`);
+    return {};
+  }
+})();
+
+function buildRoutePath(segment) {
+  const normalized = typeof segment === 'string'
+    ? segment.trim().replace(/^\/+/, '')
+    : '';
+  if (!normalized) {
+    return ROUTE_PREFIX || '/';
+  }
+  if (!ROUTE_PREFIX) {
+    return `/${normalized}`;
+  }
+  return `${ROUTE_PREFIX}/${normalized}`;
+}
+
+function findOverrideForRoute(upstreamPath, route) {
+  const candidates = new Set();
+  if (typeof upstreamPath === 'string') {
+    const trimmed = upstreamPath.trim();
+    if (trimmed) {
+      candidates.add(trimmed);
+      candidates.add(trimmed.startsWith('/') ? trimmed : `/${trimmed}`);
+    }
+  }
+  if (typeof route === 'string') {
+    const trimmedRoute = route.trim();
+    if (trimmedRoute) {
+      candidates.add(trimmedRoute);
+      candidates.add(trimmedRoute.replace(/^\/+/, ''));
+      if (ROUTE_PREFIX && trimmedRoute.startsWith(`${ROUTE_PREFIX}/`)) {
+        const withoutPrefix = trimmedRoute.slice(ROUTE_PREFIX.length);
+        const withoutPrefixNormalized = withoutPrefix.replace(/^\/+/, '');
+        if (withoutPrefix) candidates.add(withoutPrefix);
+        if (withoutPrefixNormalized) {
+          candidates.add(withoutPrefixNormalized);
+          candidates.add(`/${withoutPrefixNormalized}`);
+        }
+      }
+    }
+  }
+  for (const key of candidates) {
+    if (Object.prototype.hasOwnProperty.call(upstreamOverrides, key)) {
+      return upstreamOverrides[key];
+    }
+  }
+  return null;
+}
+
+function buildUpstreamUrl(base, route, overrideValue) {
+  if (overrideValue && /^https?:\/\//i.test(overrideValue)) {
+    return overrideValue;
+  }
+  if (overrideValue) {
+    const relative = overrideValue.startsWith('/') ? overrideValue : `/${overrideValue}`;
+    return `${base}${relative}`;
+  }
+  return `${base}${route}`;
+}
+
 // Ensure log directory exists
 const LOG_DIR = path.join(__dirname, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'requests.ndjson');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+const DEFAULT_LOG_LIMIT = 200;
+const MAX_LOG_LIMIT = 1000;
 
-function logRequest(id, route, body) {
+function logRequest(id, route, body, upstreamUrl) {
   const entry = {
     ts: new Date().toISOString(),
     id,
     type: 'request',
     route,
+    ...(upstreamUrl ? { target: upstreamUrl } : {}),
     body,
   };
   const line = JSON.stringify(entry) + '\n';
@@ -95,7 +189,29 @@ function logRequest(id, route, body) {
     if (err) console.error('Failed to write log:', err);
   });
   console.log(`\n=== ${route} @ ${entry.ts} ===`);
+  if (upstreamUrl) {
+    console.log(`[target] ${upstreamUrl}`);
+  }
   console.log(JSON.stringify(body, null, 2));
+}
+
+async function loadRecentLogs(limit = DEFAULT_LOG_LIMIT) {
+  const effectiveLimit = Math.min(Math.max(1, Number(limit) || DEFAULT_LOG_LIMIT), MAX_LOG_LIMIT);
+  try {
+    const data = await fsp.readFile(LOG_FILE, 'utf8');
+    const lines = data.split(/\r?\n/).filter(Boolean);
+    const recent = lines.slice(-effectiveLimit);
+    return recent.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (err) {
+        return { ts: new Date().toISOString(), type: 'parse_error', raw: line, error: err.message };
+      }
+    });
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
 }
 
 function logResponseFull(id, route, status, headers, bodyText, summaryText) {
@@ -282,13 +398,16 @@ function extractToolCalls(bodyText, headers) {
 }
 
 async function proxyPost(req, res, upstreamPath) {
-  const route = `/v1/${upstreamPath}`;
+  const normalizedPath = typeof upstreamPath === 'string' ? upstreamPath.trim().replace(/^\/+/, '') : '';
+  const route = buildRoutePath(normalizedPath);
+  const overrideValue = findOverrideForRoute(upstreamPath, route);
+  const upstreamUrl = buildUpstreamUrl(API_BASE, route, overrideValue);
   const reqId = (crypto.randomUUID && typeof crypto.randomUUID === 'function')
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const body = req.body || {};
 
-  logRequest(reqId, route, body);
+  logRequest(reqId, route, body, upstreamUrl);
 
   const headers = {
     'Content-Type': 'application/json',
@@ -331,14 +450,17 @@ async function proxyPost(req, res, upstreamPath) {
     headers['OpenAI-Beta'] = OPENAI_BETA;
   }
 
-  if (!headers['Authorization'] && /^https?:\/\/api\.openai\.com\//.test(API_BASE)) {
+  if (!headers['Authorization'] && /^https?:\/\/api\.openai\.com(?:$|\/)/.test(API_BASE)) {
     res.status(401).json({ error: 'No Authorization header and no UPSTREAM_API_KEY set.' });
     return;
   }
 
   try {
-    const upstreamUrl = `${API_BASE}${route}`;
-    console.log('[proxy] Forwarding to', upstreamUrl);
+    if (overrideValue) {
+      console.log('[proxy] Forwarding to override', upstreamUrl);
+    } else {
+      console.log('[proxy] Forwarding to', upstreamUrl);
+    }
     const upstreamResp = await fetch(upstreamUrl, {
       method: 'POST',
       headers,
@@ -444,13 +566,84 @@ async function proxyPost(req, res, upstreamPath) {
   }
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true, apiBase: API_BASE }));
+app.get('/health', (_req, res) => res.json({ ok: true, apiBase: API_BASE, namespace: API_NAMESPACE }));
 
-app.post('/v1/chat/completions', (req, res) => proxyPost(req, res, 'chat/completions'));
-app.post('/v1/responses', (req, res) => proxyPost(req, res, 'responses'));
+app.get('/logs/data', async (req, res) => {
+  try {
+    const { limit } = req.query;
+    const entries = await loadRecentLogs(limit);
+    res.json({ entries });
+  } catch (err) {
+    console.error('[logs] Failed to read log file:', err);
+    res.status(500).json({ error: 'Failed to read logs', detail: err.message });
+  }
+});
 
-app.post('/v1/:first', (req, res) => proxyPost(req, res, req.params.first));
-app.post('/v1/:first/:second', (req, res) => proxyPost(req, res, `${req.params.first}/${req.params.second}`));
+app.get('/logs', (_req, res) => {
+  const html = `<!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Proxy Logs</title>
+    <style>
+      body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; margin: 0; background: #111; color: #f5f5f5; }
+      header { padding: 12px 16px; background: #1d1d1d; display: flex; gap: 12px; align-items: baseline; }
+      header h1 { margin: 0; font-size: 1.1rem; }
+      main { padding: 16px; }
+      textarea { width: 100%; height: 80vh; background: #000; color: #0f0; border: 1px solid #333; padding: 12px; box-sizing: border-box; font-size: 0.9rem; }
+      label { font-size: 0.85rem; color: #ccc; }
+      input { background: #222; border: 1px solid #444; color: #f5f5f5; padding: 4px 6px; margin-left: 6px; width: 70px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LLM Proxy Logs</h1>
+      <label>Dernières entrées: <input id="limit" type="number" min="1" max="${MAX_LOG_LIMIT}" value="${DEFAULT_LOG_LIMIT}" /></label>
+      <span id="status">Chargement…</span>
+    </header>
+    <main>
+      <textarea id="log" readonly></textarea>
+    </main>
+    <script>
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const limitInput = document.getElementById('limit');
+      const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
+
+      async function fetchLogs() {
+        const limit = clamp(parseInt(limitInput.value, 10) || ${DEFAULT_LOG_LIMIT}, 1, ${MAX_LOG_LIMIT});
+        const params = new URLSearchParams({ limit: String(limit) });
+        try {
+          const resp = await fetch('/logs/data?' + params.toString(), { cache: 'no-store' });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const data = await resp.json();
+          const lines = (data.entries || []).map(entry => JSON.stringify(entry));
+          logEl.value = lines.join('\n');
+          logEl.scrollTop = logEl.scrollHeight;
+          const now = new Date().toLocaleTimeString();
+          statusEl.textContent = 'Mis à jour: ' + now;
+        } catch (err) {
+          statusEl.textContent = 'Erreur: ' + err.message;
+        }
+      }
+
+      limitInput.addEventListener('change', fetchLogs);
+      setInterval(fetchLogs, 4000);
+      fetchLogs();
+    </script>
+  </body>
+  </html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+const PROXY_PREFIX = ROUTE_PREFIX || '';
+
+app.post(`${PROXY_PREFIX}/chat/completions`, (req, res) => proxyPost(req, res, 'chat/completions'));
+app.post(`${PROXY_PREFIX}/responses`, (req, res) => proxyPost(req, res, 'responses'));
+
+app.post(`${PROXY_PREFIX}/:first`, (req, res) => proxyPost(req, res, req.params.first));
+app.post(`${PROXY_PREFIX}/:first/:second`, (req, res) => proxyPost(req, res, `${req.params.first}/${req.params.second}`));
 
 function startListening(port, triesLeft = 10) {
   const server = app.listen(port, () => {
@@ -459,6 +652,7 @@ function startListening(port, triesLeft = 10) {
       console.log(`[port] ${PORT} was busy, auto-switched to ${port}`);
     }
     console.log(`Upstream base: ${API_BASE}`);
+    console.log(`Proxy namespace: ${API_NAMESPACE || '(root)'}`);
     console.log(`Auth mode: ${ALLOW_CLIENT_AUTH ? 'pass-through client Authorization' : (UPSTREAM_API_KEY ? 'UPSTREAM_API_KEY' : 'none')}`);
     console.log(`Logging to: ${LOG_FILE}`);
   });

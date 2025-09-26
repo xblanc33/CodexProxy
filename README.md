@@ -4,7 +4,7 @@ A tiny Node/Express proxy that forwards OpenAI‑compatible API requests while w
 
 ## Features
 
-- OpenAI‑compatible proxy to any API base (default `https://api.openai.com/v1`).
+- OpenAI‑compatible proxy to any API base (default `https://api.openai.com`).
 - Logs every request/response to `logs/requests.ndjson` (one JSON per line).
 - Streams upstream SSE to the client while also logging the full response once.
 - Extracts assistant content into a concise `content` field (best‑effort).
@@ -29,7 +29,8 @@ npm i node-fetch@3
 
 ```ini
 PORT=5000
-API_BASE=https://api.openai.com/v1
+API_BASE=https://api.openai.com
+API_NAMESPACE=v1
 UPSTREAM_API_KEY=sk-...
 ALLOW_CLIENT_AUTH=false
 # Optional header helpers
@@ -97,12 +98,12 @@ model_reasoning_effort = "medium"
 # Providers
 [model_providers.openai2]
 name = "openai2"
-base_url = "http://127.0.0.1:5050/v1"
+base_url = "http://127.0.0.1:5050"
 wire_api = "chat"
 ```
 
 Notes:
-- `base_url` must point at this proxy (`/v1` path included) and the correct port.
+- `base_url` must point at this proxy and the correct port.
 - If you want Codex to forward your own API key to the proxy, enable `ALLOW_CLIENT_AUTH=true` in the proxy `.env`. Otherwise, set `UPSTREAM_API_KEY` in the proxy `.env` so the proxy authenticates upstream on behalf of clients.
 
 ## Logging
@@ -119,6 +120,7 @@ Request entry shape (example):
   "id": "<uuid>",
   "type": "request",
   "route": "/v1/chat/completions",
+  "target": "https://api.openai.com/v1/chat/completions",
   "body": { "model": "...", "messages": [...] }
 }
 ```
@@ -141,6 +143,7 @@ Response entry shape (example):
 Notes:
 - `tool_calls`: extracted from final messages (`choices[].message.tool_calls`) or reconstructed from streaming deltas (`choices[].delta.tool_calls`). `arguments` is the raw string (may be JSON).
 - `body` presence is controlled by `LOG_RAW_BODY` (default `true`). Set `LOG_RAW_BODY=false` to omit raw bodies from logs.
+- `target`: request logs include the fully resolved upstream URL after namespace/override handling.
 - Response headers are intentionally not logged.
 
 Tail the log:
@@ -149,19 +152,44 @@ Tail the log:
 tail -f logs/requests.ndjson
 ```
 
+Prefer un petit tableau de bord ? Rendez-vous sur `http://localhost:<PORT>/logs` pour afficher dans le navigateur les dernières entrées (limite ajustable, mise à jour automatique).
+
 ## Configuration
 
 Environment variables (via `.env`):
 
 - `PORT` (number): HTTP port (default `5000`).
-- `AUTO_PORT` (bool): If used in your environment, can auto‑select a free port (default `true`).
-- `API_BASE` (string): Upstream base, e.g. `https://api.openai.com/v1`.
+- `AUTO_PORT` (bool): If used in your environment, can auto-select a free port (default `true`).
+- `API_BASE` (string): Upstream base, e.g. `https://api.openai.com` (namespace handled separately by `API_NAMESPACE`).
+- `API_NAMESPACE` (string): Proxy path prefix (default `v1`). Set to `v1beta`, `v1alpha`, etc., or empty to forward from `/`.
 - `UPSTREAM_API_KEY` (string): Upstream API key used if client does not send `Authorization`.
 - `ALLOW_CLIENT_AUTH` (bool): If `true`, forwards client `Authorization` and `OpenAI-*` headers.
-- `OPENAI_ORG`, `OPENAI_PROJECT` (strings): Injected when appropriate; project‑scoped keys typically don’t require these.
+- `OPENAI_ORG`, `OPENAI_PROJECT` (strings): Injected when appropriate; project-scoped keys typically don’t require these.
 - `OPENAI_BETA` (string): Optional beta header to pass through (harmless if unused).
-- `FORCE_OPENAI_HEADERS` (bool): Force inject org/project even with project‑scoped keys.
+- `FORCE_OPENAI_HEADERS` (bool): Force inject org/project even with project-scoped keys.
 - `LOG_RAW_BODY` (bool): Include raw body text in response logs (default `true`).
+- `UPSTREAM_URL_OVERRIDES` (JSON object): Map proxied routes to custom upstream URLs or paths, e.g. `{"chat/completions":"https://my-host/openai/deployments/foo/chat/completions?api-version=2024-02-01"}`. Relative paths are appended to `API_BASE`.
+
+### Custom proxy namespace
+
+Need the proxy to serve routes under something other than `/v1` (e.g., Google Gemini expects `/v1beta`)? Set `API_NAMESPACE` accordingly.
+
+```ini
+# .env example
+API_NAMESPACE=v1beta
+```
+
+All proxied routes (e.g., `chat/completions`, catch-all) will now be available under `/v1beta/...`. Set `API_NAMESPACE` to an empty string to expose them directly at the root (e.g., `/chat/completions`).
+
+### Custom upstream routes
+
+When targeting providers that reshape the OpenAI paths (e.g. Azure OpenAI deployments), supply an override map via `UPSTREAM_URL_OVERRIDES`. Keys can be either `chat/completions`, `/v1/chat/completions`, or any other proxied route. Values may be full URLs or relative paths appended to `API_BASE`.
+
+```ini
+# .env example
+API_BASE=https://my-azure-resource.openai.azure.com
+UPSTREAM_URL_OVERRIDES={"chat/completions":"/openai/deployments/my-model/chat/completions?api-version=2024-02-01"}
+```
 
 ## Behavior Notes
 
