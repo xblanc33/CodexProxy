@@ -29,8 +29,8 @@ npm i node-fetch@3
 
 ```ini
 PORT=5000
-API_BASE=https://api.openai.com
-API_NAMESPACE=v1
+API_BASE=https://api.openai.com/v1
+#API_BASE=https://generativelanguage.googleapis.com
 UPSTREAM_API_KEY=sk-...
 ALLOW_CLIENT_AUTH=false
 # Optional header helpers
@@ -90,16 +90,15 @@ Configure Codex to send requests through this proxy by adding a new provider and
 3) In your Codex config (TOML), add a provider and set it as default:
 
 ```toml
-# Defaults
-model_provider = "openai2"
+model_provider = "proxy"
 model = "gpt-5"
-model_reasoning_effort = "medium"
+#model = "gemini-2.5-flash"
 
-# Providers
-[model_providers.openai2]
-name = "openai2"
-base_url = "http://127.0.0.1:5050"
+[model_providers.proxy]
+name = "proxy"
+base_url = "http://127.0.0.1:5050/v1"
 wire_api = "chat"
+
 ```
 
 Notes:
@@ -152,7 +151,7 @@ Tail the log:
 tail -f logs/requests.ndjson
 ```
 
-Prefer un petit tableau de bord ? Rendez-vous sur `http://localhost:<PORT>/logs` pour explorer les dernières entrées via un arbre JSON interactif (limite ajustable, actualisation manuelle).
+Want a quick dashboard? Visit `http://localhost:<PORT>/logs` to explore the latest entries via an interactive JSON tree (adjustable limit, manual refresh). The UI lives in `public/logs.html`, a self-contained static page that pairs each request with its response, hides large bodies, and lets you drill into the JSON node by node.
 
 ## Configuration
 
@@ -160,7 +159,7 @@ Environment variables (via `.env`):
 
 - `PORT` (number): HTTP port (default `5000`).
 - `AUTO_PORT` (bool): If used in your environment, can auto-select a free port (default `true`).
-- `API_BASE` (string): Upstream base, e.g. `https://api.openai.com` (namespace handled separately by `API_NAMESPACE`).
+- `API_BASE` (string): Upstream base, e.g. `https://api.openai.com/v1` (namespace handled separately by `API_NAMESPACE`).
 - `API_NAMESPACE` (string): Proxy path prefix (default `v1`). Set to `v1beta`, `v1alpha`, etc., or empty to forward from `/`.
 - `UPSTREAM_API_KEY` (string): Upstream API key used if client does not send `Authorization`.
 - `ALLOW_CLIENT_AUTH` (bool): If `true`, forwards client `Authorization` and `OpenAI-*` headers.
