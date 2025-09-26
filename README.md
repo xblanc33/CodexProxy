@@ -152,7 +152,7 @@ Tail the log:
 tail -f logs/requests.ndjson
 ```
 
-Prefer un petit tableau de bord ? Rendez-vous sur `http://localhost:<PORT>/logs` pour afficher dans le navigateur les dernières entrées (limite ajustable, mise à jour automatique).
+Prefer un petit tableau de bord ? Rendez-vous sur `http://localhost:<PORT>/logs` pour explorer les dernières entrées via un arbre JSON interactif (limite ajustable, actualisation manuelle).
 
 ## Configuration
 

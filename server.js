@@ -580,61 +580,7 @@ app.get('/logs/data', async (req, res) => {
 });
 
 app.get('/logs', (_req, res) => {
-  const html = `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Proxy Logs</title>
-    <style>
-      body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; margin: 0; background: #111; color: #f5f5f5; }
-      header { padding: 12px 16px; background: #1d1d1d; display: flex; gap: 12px; align-items: baseline; }
-      header h1 { margin: 0; font-size: 1.1rem; }
-      main { padding: 16px; }
-      textarea { width: 100%; height: 80vh; background: #000; color: #0f0; border: 1px solid #333; padding: 12px; box-sizing: border-box; font-size: 0.9rem; }
-      label { font-size: 0.85rem; color: #ccc; }
-      input { background: #222; border: 1px solid #444; color: #f5f5f5; padding: 4px 6px; margin-left: 6px; width: 70px; }
-    </style>
-  </head>
-  <body>
-    <header>
-      <h1>LLM Proxy Logs</h1>
-      <label>Dernières entrées: <input id="limit" type="number" min="1" max="${MAX_LOG_LIMIT}" value="${DEFAULT_LOG_LIMIT}" /></label>
-      <span id="status">Chargement…</span>
-    </header>
-    <main>
-      <textarea id="log" readonly></textarea>
-    </main>
-    <script>
-      const statusEl = document.getElementById('status');
-      const logEl = document.getElementById('log');
-      const limitInput = document.getElementById('limit');
-      const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
-
-      async function fetchLogs() {
-        const limit = clamp(parseInt(limitInput.value, 10) || ${DEFAULT_LOG_LIMIT}, 1, ${MAX_LOG_LIMIT});
-        const params = new URLSearchParams({ limit: String(limit) });
-        try {
-          const resp = await fetch('/logs/data?' + params.toString(), { cache: 'no-store' });
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
-          const data = await resp.json();
-          const lines = (data.entries || []).map(entry => JSON.stringify(entry));
-          logEl.value = lines.join('\n');
-          logEl.scrollTop = logEl.scrollHeight;
-          const now = new Date().toLocaleTimeString();
-          statusEl.textContent = 'Mis à jour: ' + now;
-        } catch (err) {
-          statusEl.textContent = 'Erreur: ' + err.message;
-        }
-      }
-
-      limitInput.addEventListener('change', fetchLogs);
-      setInterval(fetchLogs, 4000);
-      fetchLogs();
-    </script>
-  </body>
-  </html>`;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(html);
+  res.sendFile(path.join(__dirname, 'public', 'logs.html'));
 });
 
 const PROXY_PREFIX = ROUTE_PREFIX || '';
